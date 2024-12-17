@@ -158,6 +158,9 @@ def train(args, train_loader, model, criterion, optimizer, lr_decay, epoch, inde
     model.train()
     l2_reg = 0.5
     for i, (input, target) in tqdm(enumerate(train_loader), total=len(train_loader)):
+        # compute gradient and do optimizing step
+        # Before backward, use opt change all variable's loss = 0, b/c gradient will accumulate
+        optimizer.zero_grad()
         input = input.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
 
@@ -178,15 +181,8 @@ def train(args, train_loader, model, criterion, optimizer, lr_decay, epoch, inde
         dices_1s.update(torch.tensor(dice_1), input.size(0))
         dices_2s.update(torch.tensor(dice_2), input.size(0))
 
-
-        # compute gradient and do optimizing step
-        # Before backward, use opt change all variable's loss = 0, b/c gradient will accumulate
-        optimizer.zero_grad()
         # backward to calculate loss
         loss.backward()
-        # 梯度裁剪
-        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
         optimizer.step()
     # update learning rate
     # dynamic_gamma = get_gamma(epoch, args.epochs)
