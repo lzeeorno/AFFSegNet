@@ -7,7 +7,6 @@ import scipy.spatial as spatial
 import math
 from scipy.ndimage import distance_transform_edt
 
-
 def mean_iou(y_true_in, y_pred_in, print_table=False):
     if True: #not np.sum(y_true_in.flatten()) == 0:
         labels = y_true_in
@@ -122,20 +121,40 @@ def rvd_score(output, target):
 Jaccard
 Volume Overlap
 '''
+# def iou_score(output, target):
+#     smooth = 1e-5
+#     l2_reg = 0.1 # regularization
+#     if torch.is_tensor(output):
+#         output = torch.sigmoid(output).data.cpu().numpy()
+#     if torch.is_tensor(target):
+#         target = target.data.cpu().numpy()
+#     output_ = output > 0.5
+#     target_ = target > 0.5
+#     intersection = (output_ & target_).sum()
+#     union = (output_ | target_).sum()
+#
+#     return (intersection + smooth) / (union + smooth)
+
 def iou_score(output, target):
-    smooth = 1e-5
-    l2_reg = 0.1 # regularization
-    if torch.is_tensor(output):
-        output = torch.sigmoid(output).data.cpu().numpy()
-    if torch.is_tensor(target):
-        target = target.data.cpu().numpy()
-    output_ = output > 0.5
-    target_ = target > 0.5
-    intersection = (output_ & target_).sum()
-    union = (output_ | target_).sum()
+    #gpu
+    smooth = 1e-5  # 防止分母为 0
 
-    return (intersection + smooth) / (union + smooth)
+    # 使用 sigmoid 激活函数，并保持在 GPU 上
+    output = torch.sigmoid(output)
 
+    # 阈值化操作，保持在 GPU 上
+    output_ = (output > 0.5).float()
+    target_ = (target > 0.5).float()
+
+    # 计算交集和并集，保持在 GPU 上
+    intersection = (output_ * target_).sum(dim=(1, 2, 3))  # 按批次求和
+    union = (output_ + target_ - output_ * target_).sum(dim=(1, 2, 3))  # 并集公式
+
+    # 计算 IoU
+    iou = (intersection + smooth) / (union + smooth)
+
+    # 返回每个 batch 的平均 IoU
+    return iou.mean().item()
 
 def f1_score(output, target):
     smooth = 1e-5
@@ -269,6 +288,8 @@ def hd95_2d(output, target):
 
     return hd95
 
+
+
 '''
 MSD (Mean Surface Distance):
 MSD measures the average distance between corresponding points on the predicted and ground truth surfaces.
@@ -300,10 +321,9 @@ def msd_score(output, target):
 #     union = (output_ | target_).sum()
 #
 #     return (intersection + smooth) / (union + smooth)
-def dice_coef_synapse(output, target):
+def dice_coef_synapse_cpu(output, target):
     smooth = 1e-5  # 防止 union 为 0
     l2_reg = 0.9989
-    num = output.shape[0]
 
     if torch.is_tensor(output):
         output = torch.sigmoid(output).data.cpu().numpy()
@@ -315,7 +335,7 @@ def dice_coef_synapse(output, target):
 
     dice_scores = []
 
-    for i in range(1, 9):  # 从 1 到 8，忽略背景
+    for i in range(1, 9):  # 从 1 到 8，忽略背景0
         output_i = output_[:, i, :, :]
         target_i = target_[:, i, :, :]
 
@@ -327,35 +347,94 @@ def dice_coef_synapse(output, target):
 
     return dice_scores
 
+def dice_coef_synapse(output, target):
+    smooth = 1e-5  # 防止 union 为 0
+
+    # 确保输入是张量，并在 GPU 上进行计算
+    if torch.is_tensor(output):
+        output = torch.sigmoid(output)  # 使用 sigmoid 激活函数
+    if torch.is_tensor(target):
+        target = target.float()  # 确保 target 是浮点型
+
+    # 阈值化操作
+    output_ = (output > 0.5).float()
+    target_ = (target > 0.5).float()
+
+    dice_scores = []
+
+    for i in range(1, 9):  # 从 1 到 8，忽略背景 0
+        output_i = output_[:, i, :, :]
+        target_i = target_[:, i, :, :]
+
+        # 计算交集和并集
+        intersection = (output_i * target_i).sum(dim=(1, 2))  # 按批次求和
+        union = output_i.sum(dim=(1, 2)) + target_i.sum(dim=(1, 2))
+
+        # 计算 Dice 系数
+        dice_i = (2. * intersection + smooth) / (union + smooth)
+        dice_scores.append(dice_i.mean().item())  # 返回每个通道的平均 Dice 系数
+
+    return dice_scores
+
 
 def dice_coef_lits(output, target):
-    smooth = 1e-5 # in case union is 0
+    smooth = 1e-5  # 防止分母为 0
     l2_reg = 0.9989
-    num = output.shape[0]
-    if torch.is_tensor(output):
-        output = torch.sigmoid(output).data.cpu().numpy()
-    if torch.is_tensor(target):
-        target = target.data.cpu().numpy()
-    output_ = output > 0.5
-    target_ = target > 0.5
-    # print(output_.shape, target_.shape)
-    # exit()
-    output_1 = output_[:,1,:,:] #liver
-    output_2 = output_[:,2,:,:] #tumor
 
-    target_1 = target_[:,1,:,:]
-    target_2 = target_[:,2,:,:]
+    # 使用 sigmoid 激活函数，并保持在 GPU 上
+    output = torch.sigmoid(output)
 
-    intersection_1 = (output_1 * target_1)
-    intersection_2 = (output_2 * target_2)
+    # 阈值化操作，保持在 GPU 上
+    output_ = (output > 0.5).float()
+    target_ = (target > 0.5).float()
 
-    union1 = output_1.sum() + target_1.sum()
-    union2 = output_2.sum() + target_2.sum()
+    # 分别取出 liver 和 tumor 的通道
+    output_1 = output_[:, 1, :, :]  # liver
+    output_2 = output_[:, 2, :, :]  # tumor
+    target_1 = target_[:, 1, :, :]
+    target_2 = target_[:, 2, :, :]
 
-    dice_1 = (2. * intersection_1.sum() + smooth) / (union1 + smooth)
-    dice_2 = (2. * intersection_2.sum() + smooth) / (union2 + smooth)
+    # 计算交集和并集，保持在 GPU 上
+    intersection_1 = (output_1 * target_1).sum(dim=(1, 2))  # 按批次求和
+    intersection_2 = (output_2 * target_2).sum(dim=(1, 2))
+    union1 = output_1.sum(dim=(1, 2)) + target_1.sum(dim=(1, 2))
+    union2 = output_2.sum(dim=(1, 2)) + target_2.sum(dim=(1, 2))
 
-    return dice_1, dice_2
+    # 计算 Dice 系数
+    dice_1 = (2. * intersection_1 + smooth) / (union1 + smooth)
+    dice_2 = (2. * intersection_2 + smooth) / (union2 + smooth)
+
+    # 返回每个 batch 的平均 Dice 系数
+    return dice_1.mean().item(), dice_2.mean().item()
+
+# def dice_coef_lits(output, target):
+#     smooth = 1e-5 # in case union is 0
+#     l2_reg = 0.9989
+#     num = output.shape[0]
+#     if torch.is_tensor(output):
+#         output = torch.sigmoid(output).data.cpu().numpy()
+#     if torch.is_tensor(target):
+#         target = target.data.cpu().numpy()
+#     output_ = output > 0.5
+#     target_ = target > 0.5
+#     # print(output_.shape, target_.shape)
+#     # exit()
+#     output_1 = output_[:,1,:,:] #liver
+#     output_2 = output_[:,2,:,:] #tumor
+#
+#     target_1 = target_[:,1,:,:]
+#     target_2 = target_[:,2,:,:]
+#
+#     intersection_1 = (output_1 * target_1)
+#     intersection_2 = (output_2 * target_2)
+#
+#     union1 = output_1.sum() + target_1.sum()
+#     union2 = output_2.sum() + target_2.sum()
+#
+#     dice_1 = (2. * intersection_1.sum() + smooth) / (union1 + smooth)
+#     dice_2 = (2. * intersection_2.sum() + smooth) / (union2 + smooth)
+#
+#     return dice_1, dice_2
 
 def dice_coef(output, target):
     smooth = 1e-5 # in case union is 0
