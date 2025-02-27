@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.optim import lr_scheduler
 from torch.utils.data import DataLoader
 import torch.backends.cudnn as cudnn
+import torch.cuda.amp as amp
 import albumentations as A
 from albumentations.pytorch.transforms import ToTensorV2
 from dataset.dataset import Dataset_ssl_lits2017_png
@@ -24,7 +25,7 @@ import utilities.losses as losses
 from utilities.utils import str2bool, count_params
 from utilities.utils import load_pretrained_weights
 import pandas as pd
-from net.ASSNet import ASSNet
+from net.AFFSegNet import AFFSegNet
 
 
 
@@ -40,9 +41,9 @@ def parse_args():
     parser.add_argument('--img_size', default=512)
 
     # mode name on log record
-    parser.add_argument('--model_name', default='ASSNet',
+    parser.add_argument('--model_name', default='AFFSegNet',
                         choices=['Unet', 'AttUnet', 'res_unet_plus', 'R2Unet', 'R2AttU_Net',
-                                 'sepnet', 'KiU_Net', 'Unet3D', 'ResT', 'ASSNet'
+                                 'sepnet', 'KiU_Net', 'Unet3D', 'ResT', 'AFFSegNet'
                                  ])
     # pre trained
     parser.add_argument('--pretrained', default=False, type=str2bool)
@@ -64,8 +65,8 @@ def parse_args():
     parser.add_argument('--early-stop', default=500, type=int,
                         metavar='N', help='early stopping (default: 30)')
     parser.add_argument('--gamma', default=1.0, type=float)
-    parser.add_argument('-b', '--batch_size', default=10, type=int,
-                        metavar='N', help='check your GPU')
+    parser.add_argument('-b', '--batch_size', default=20, type=int,
+                        metavar='N', help='check your GPU,A6000 48G:20, 4090 24G:10')
     parser.add_argument('--optimizer', default='SGD',
                         choices=['Adam', 'SGD'])
     parser.add_argument('--lr', '--learning-rate', default=0.01, type=float,
@@ -82,17 +83,14 @@ def parse_args():
     return args
 
 
-class AverageMeter(object):
-    """Computes and stores the average and current value"""
-
+class AverageMeter:
     def __init__(self):
         self.reset()
 
     def reset(self):
-        self.val = 0
-        self.avg = 0
-        self.sum = 0
-        self.count = 0
+        self.val = torch.tensor(0.0).cuda()
+        self.sum = torch.tensor(0.0).cuda()
+        self.count = torch.tensor(0.0).cuda()
 
     def update(self, val, n=1):
         self.val = val
@@ -158,12 +156,11 @@ def train(args, train_loader, model, criterion, optimizer, lr_decay, epoch, inde
     model.train()
     l2_reg = 0.5
     for i, (input, target) in tqdm(enumerate(train_loader), total=len(train_loader)):
+        input = input.cuda(non_blocking=True)
+        target = target.cuda(non_blocking=True)
         # compute gradient and do optimizing step
         # Before backward, use opt change all variable's loss = 0, b/c gradient will accumulate
         optimizer.zero_grad()
-        input = input.cuda(non_blocking=True)
-        target = target.cuda(non_blocking=True)
-
         # Check for NaNs in inputs
         if torch.isnan(input).any() or torch.isnan(target).any():
             print("Input contains NaN")
@@ -184,6 +181,8 @@ def train(args, train_loader, model, criterion, optimizer, lr_decay, epoch, inde
         # backward to calculate loss
         loss.backward()
         optimizer.step()
+        # 梯度裁剪
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
     # update learning rate
     # dynamic_gamma = get_gamma(epoch, args.epochs)
     # lr_decay.gamma = dynamic_gamma
@@ -217,34 +216,36 @@ def validate(args, val_loader, model, criterion):
 
     with torch.no_grad():
         for i, (input, target) in tqdm(enumerate(val_loader), total=len(val_loader)):
-            input = input.cuda()
-            target = target.cuda()
+            input = input.cuda(non_blocking=True).float()
+            target = target.cuda(non_blocking=True).float()
 
-            with torch.cuda.amp.autocast():
+            # 混合精度推理
+            with amp.autocast():  # 自动使用混合精度
                 l2_reg = 0.1
                 # compute output
                 outputs = model(input)
-                loss = criterion(outputs, target)
+                loss = criterion(outputs, target).cuda()
                 iou = iou_score(outputs, target)
                 dice_1 = dice_coef_lits(outputs, target)[0]
                 dice_2 = dice_coef_lits(outputs, target)[1]
-                hd95 = hd95_2d(outputs, target)
+                # hd95 = hd95_2d(outputs, target)
 
-                losses.update(loss.item(), input.size(0))
-                ious.update(iou, input.size(0))
-                dices_1s.update(torch.tensor(dice_1), input.size(0))
-                dices_2s.update(torch.tensor(dice_2), input.size(0))
-                hd95_s.update(torch.tensor(hd95), input.size(0))
+            losses.update(loss.item(), input.size(0))
+            ious.update(iou, input.size(0))
+            dices_1s.update(torch.tensor(dice_1), input.size(0))
+            dices_2s.update(torch.tensor(dice_2), input.size(0))
+            # hd95_s.update(torch.tensor(hd95), input.size(0))
 
-            log = OrderedDict([
-                ('loss', losses.avg),
-                ('iou', ious.avg),
-                ('dice_1', dices_1s.avg),
-                ('dice_2', dices_2s.avg),
-                ('HD95_avg', hd95_s.avg),
-            ])
+        log = OrderedDict([
+            ('loss', losses.avg),
+            ('iou', ious.avg),
+            ('dice_1', dices_1s.avg),
+            ('dice_2', dices_2s.avg),
+            # ('HD95_avg', hd95_s.avg),
+        ])
 
-            return log
+        return log
+
 
 def get_gamma(epoch, total_epochs):
     return ((1 - (epoch / total_epochs)) ** 0.9)
@@ -312,10 +313,10 @@ def main():
         model = Unet.R2AttU_Net(args)
     if args.model_name == 'sepnet':
         model = sepnet.sepnet(args)
-    if args.model_name == 'ASSNet':
-        model = ASSNet(args)
+    if args.model_name == 'AFFSegNet':
+        model = AFFSegNet(args)
         pretrained_path = '../pretrain/xxx.pth'
-        print('ASSNet pretrained selected!')
+        print('AFFSegNet pretrained selected!')
 
 
     model = torch.nn.DataParallel(model).cuda()
@@ -367,27 +368,25 @@ def main():
         A.Sharpen(alpha=(0.04 * level, 0.1 * level), lightness=(1, 1), p=0.2 * level),
         A.GaussianBlur(blur_limit=(3, make_odd(3 + 0.8 * level)), p=min(0.2 * level, 1)),
         A.GaussNoise(var_limit=(2 * level, 10 * level), mean=0, per_channel=True, p=0.2 * level),
-        A.Rotate(limit=4 * level, interpolation=1, border_mode=0, value=0, mask_value=None, rotate_method='largest_box',
-                 crop_border=False, p=0.2 * level),
+        A.Rotate(limit=4 * level, interpolation=1, border_mode=0, value=0, mask_value=None, p=0.2 * level),
         A.HorizontalFlip(p=0.2 * level),
         A.VerticalFlip(p=0.2 * level),
         A.Affine(scale=(1 - 0.04 * level, 1 + 0.04 * level), translate_percent=None, translate_px=None, rotate=None,
-                 shear=None, interpolation=1, mask_interpolation=0, cval=0, cval_mask=0, mode=0, fit_output=False,
-                 keep_ratio=True, p=0.2 * level),
+                 shear=None, interpolation=1, cval=0, cval_mask=0, mode=0, fit_output=False, p=0.2 * level),
         A.Affine(scale=None, translate_percent=None, translate_px=None, rotate=None,
                  shear={'x': (0, 2 * level), 'y': (0, 0)}
-                 , interpolation=1, mask_interpolation=0, cval=0, cval_mask=0, mode=0, fit_output=False,
-                 keep_ratio=True, p=0.2 * level),  # x
+                 , interpolation=1, cval=0, cval_mask=0, mode=0, fit_output=False,
+                 p=0.2 * level),  # x
         A.Affine(scale=None, translate_percent=None, translate_px=None, rotate=None,
                  shear={'x': (0, 0), 'y': (0, 2 * level)}
-                 , interpolation=1, mask_interpolation=0, cval=0, cval_mask=0, mode=0, fit_output=False,
-                 keep_ratio=True, p=0.2 * level),
+                 , interpolation=1, cval=0, cval_mask=0, mode=0, fit_output=False,
+                 p=0.2 * level),
         A.Affine(scale=None, translate_percent={'x': (0, 0.02 * level), 'y': (0, 0)}, translate_px=None, rotate=None,
-                 shear=None, interpolation=1, mask_interpolation=0, cval=0, cval_mask=0, mode=0, fit_output=False,
-                 keep_ratio=True, p=0.2 * level),
+                 shear=None, interpolation=1, cval=0, cval_mask=0, mode=0, fit_output=False,
+                 p=0.2 * level),
         A.Affine(scale=None, translate_percent={'x': (0, 0), 'y': (0, 0.02 * level)}, translate_px=None, rotate=None,
-                 shear=None, interpolation=1, mask_interpolation=0, cval=0, cval_mask=0, mode=0, fit_output=False,
-                 keep_ratio=True, p=0.2 * level),
+                 shear=None, interpolation=1, cval=0, cval_mask=0, mode=0, fit_output=False,
+                 p=0.2 * level),
         A.OneOf([
             A.ElasticTransform(alpha=0.1 * level, sigma=0.25 * level, alpha_affine=0.25 * level, p=0.1),
             A.GridDistortion(distort_limit=0.05 * level, p=0.1),
@@ -415,10 +414,9 @@ def main():
         pin_memory=True,
         drop_last=False)
 
-
     log = pd.DataFrame(index=[], columns=[
         'epoch', 'lr', 'loss', 'dice_1', 'dice_2',
-        'val_loss', 'val_iou', 'val_dice_1', 'val_dice_2', 'HD95_avg'
+        'val_loss', 'val_iou', 'val_dice_1', 'val_dice_2',
     ])
     best_loss = 100
     best_train_loss = 100
@@ -426,13 +424,11 @@ def main():
     val_trigger = False
     best_iou = 0
     trigger = 0
-
-
     first_time = time.time()
-    #lr decay
-    # scheduler_mult = torch.optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.98)
+    # lr decay
+    # scheduler_mult = torch.optim.lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.99)
     # 使用 CosineAnnealingLR 调度器实现余弦退火学习率衰减策略
-    scheduler_mult = lr_scheduler.CosineAnnealingLR(optimizer, T_max=66, eta_min=6e-6)
+    scheduler_mult = lr_scheduler.CosineAnnealingLR(optimizer, T_max=100, eta_min=1e-6, last_epoch=-1)
 
     for i, epoch in enumerate(range(args.epochs)):
         print('Epoch [%d/%d]' % (epoch, args.epochs))
@@ -445,7 +441,7 @@ def main():
         if train_loss < 0:
             print('Gradient descent not exist!')
             break
-        if (train_loss < best_train_loss) and (tumor_dice > best_T_dice):
+        if (train_loss < best_train_loss) or (tumor_dice > best_T_dice):
             val_trigger = True
             best_train_loss = train_loss
             best_T_dice = tumor_dice
@@ -457,32 +453,37 @@ def main():
             print("=> Start Validation...")
             val_trigger = False
             val_log = validate(args, val_loader, model, criterion)
-            print('lr %.8f - val_loss %.4f - val_iou %.4f - val_dice_1 %.4f - val_dice_2 %.4f - val_HD95_avg %.4f'
-                  % (train_log['lr'], val_log['loss'], val_log['iou'], val_log['dice_1'], val_log['dice_2'], val_log['HD95_avg']))
+            print('lr %.8f - val_loss %.4f - val_iou %.4f - val_dice_1 %.4f - val_dice_2 %.4f'
+                  % (train_log['lr'], val_log['loss'], val_log['iou'], val_log['dice_1'], val_log['dice_2']))
+            # print('lr %.8f - val_loss %.4f - val_iou %.4f - val_dice_1 %.4f - val_dice_2 %.4f - val_HD95_avg %.4f'
+            #       % (train_log['lr'], val_log['loss'], val_log['iou'], val_log['dice_1'], val_log['dice_2'], val_log['HD95_avg']))
 
             tmp = pd.Series([
                 epoch,
                 train_log['lr'],
-                train_log['loss'],
+                train_log['loss'].cpu().item(),
                 # train_log['iou'],
-                train_log['dice_1'],
-                train_log['dice_2'],
+                train_log['dice_1'].cpu().item(),
+                train_log['dice_2'].cpu().item(),
                 # train_log['HD95'],
-                val_log['loss'],
-                val_log['iou'],
-                val_log['dice_1'],
-                val_log['dice_2'],
-                val_log['HD95_avg'],
+                val_log['loss'].cpu().item(),
+                val_log['iou'].cpu().item(),
+                val_log['dice_1'].cpu().item(),
+                val_log['dice_2'].cpu().item(),
+                # val_log['HD95_avg'].cpu().item(),
             ], index=['epoch', 'lr', 'loss', 'dice_1', 'dice_2',
-                      'val_loss', 'val_iou', 'val_dice_1', 'val_dice_2', 'HD95_avg'])
+                      'val_loss', 'val_iou', 'val_dice_1', 'val_dice_2'])  # 'HD95_avg'
 
             # # 确保 log 的列顺序与 tmp 的索引顺序一致
             log = log.reindex(columns=tmp.index.tolist())
             # log = log._append(tmp, ignore_index=True)
             # 使用 pd.concat 替代 append
             log = pd.concat([log, tmp.to_frame().T], ignore_index=True)
-            log.to_csv('../trained_models/{}_{}/{}/Validation_{}_{}_{}_batchsize_{}.csv'.format(args.dataset, args.model_name, timestamp, args.model_name,
-                                                                                 args.aug, args.loss, args.batch_size),index=False)
+            log.to_csv(
+                '../trained_models/{}_{}/{}/{}_{}_{}_batchsize_{}.csv'.format(args.dataset, args.model_name, timestamp,
+                                                                              args.model_name,
+                                                                              args.aug, args.loss, args.batch_size),
+                index=False)
             print('save result to csv ->')
             torch.save(model.state_dict(),
                        '../trained_models/{}_{}/{}/epoch{}-val_loss:{:.4f}-val_dice2:{:.4f}_model.pth'.format(
@@ -490,20 +491,20 @@ def main():
                        )
             print("=> saved best model .pth")
 
-
             # early stopping
             if not args.early_stop is None:
                 if trigger >= args.early_stop:
                     print("=> early stopping")
                     break
         else:
+
             tmp = pd.Series([
                 epoch,
                 train_log['lr'],
-                train_log['loss'],
+                train_log['loss'].cpu().item(),
                 # train_log['iou'],
-                train_log['dice_1'],
-                train_log['dice_2'],
+                train_log['dice_1'].cpu().item(),
+                train_log['dice_2'].cpu().item(),
                 # train_log['HD95'],
                 '',
                 '',
@@ -511,16 +512,17 @@ def main():
                 '',
                 '',
             ], index=['epoch', 'lr', 'loss', 'dice_1', 'dice_2',
-                      'val_loss', 'val_iou', 'val_dice_1', 'val_dice_2', 'HD95_avg'])
+                      'val_loss', 'val_iou', 'val_dice_1', 'val_dice_2'])
 
             # # 确保 log 的列顺序与 tmp 的索引顺序一致
             log = log.reindex(columns=tmp.index.tolist())
             # log = log._append(tmp, ignore_index=True)
             # 使用 pd.concat 替代 append
             log = pd.concat([log, tmp.to_frame().T], ignore_index=True)
-            log.to_csv('../trained_models/{}_{}/{}/Train_{}_{}_{}_batchsize_{}.csv'.format(args.dataset, args.model_name, timestamp,
-                                                                                 args.model_name, args.aug, args.loss,
-                                                                                 args.batch_size), index=False)
+            log.to_csv(
+                '../trained_models/{}_{}/{}/{}_{}_{}_batchsize_{}.csv'.format(args.dataset, args.model_name, timestamp,
+                                                                              args.model_name, args.aug, args.loss,
+                                                                              args.batch_size), index=False)
             print('save result to csv ->')
 
         end_time = time.time()
