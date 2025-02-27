@@ -913,7 +913,7 @@ class MFF(nn.Module):
                 m.bias.data.zero_()
 
 
-class ASSNet(nn.Module):
+class AFFSegNet(nn.Module):
     def __init__(
         self,
         args,
@@ -923,7 +923,7 @@ class ASSNet(nn.Module):
         norm_name='instance',
         dropout_rate = 0.0,
     ):
-        super(ASSNet, self).__init__()
+        super(AFFSegNet, self).__init__()
         self.args = args
         in_channels = 1
         if args.dataset == 'LiTS2017':
