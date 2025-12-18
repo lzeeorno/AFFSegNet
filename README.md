@@ -13,7 +13,7 @@ Explain
 ```
 
 
-# 📋ASSNet
+# 📋AFFSegNet
 
 AFFSegNet: Adaptive Feature Fusion Segmentation Network for Microtumors and Multi-Organ Segmentation
 
