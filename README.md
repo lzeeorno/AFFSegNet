@@ -3,18 +3,19 @@
 If you find our work helpful for your research, please cite:
 
 ```bib
-@article{zheng2024assnet,
-  title={ASSNet: Adaptive Semantic Segmentation Network for Microtumors and Multi-Organ Segmentation},
-  author={Zheng, Fuchen and Chen, Xinyi and Chen, Xuhang and Li, Haolun and Guo, Xiaojiao and Huang, Guoheng and Pun, Chi-Man and Zhou, Shoujun},
+@article{zheng2024affsegnet,
+  title={AFFSegNet: Adaptive Feature Fusion Segmentation Network for Microtumors and Multi-Organ Segmentation},
+  author={Zheng, Fuchen and Chen, Xinyi and Chen, Xuhang and Li, Haolun and Guo, Xiaojiao and Liu, Weihuang and Pun, Chi-Man and Zhou, Shoujun},
   journal={arXiv preprint arXiv:2409.07779},
   year={2024}
 }
+Explain
 ```
 
 
 # 📋ASSNet
 
-ASSNet: Adaptive Semantic Segmentation Network for Microtumors and Multi-Organ Segmentation
+AFFSegNet: Adaptive Feature Fusion Segmentation Network for Microtumors and Multi-Organ Segmentation
 
 [Fuchen Zheng](https://lzeeorno.github.io/), Xinyi Chen, [Xuhang Chen](https://cxh.netlify.app/), Haolun Li, Xiaojiao Guo, Guoheng Huang, [Chi-Man Pun](https://www.cis.um.edu.mo/~cmpun/) 📮and [Shoujun Zhou](https://people.ucas.edu.cn/~sjzhou?language=en) 📮( 📮 Corresponding authors)
 
